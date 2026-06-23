@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// Top-level CPV codes relevant for Angela's profile.
-// 72xxxxxx – IT services (consulting, software development, support, infrastructure)
-// 48xxxxxx – Software packages and information systems
 var topCPVCodes = []string{
 	"72000000", // IT services
 	"72200000", // Software programming and consultancy
@@ -36,6 +33,10 @@ func (m MultiLang) Best() string {
 		}
 	}
 	return ""
+}
+
+func (m MultiLang) HasGerman() bool {
+	return m.De != nil && *m.De != ""
 }
 
 // OrderAddress holds location information for a tender.
@@ -63,6 +64,12 @@ type Project struct {
 }
 
 // ProjectDetail holds the full publication detail for a project.
+func (p Project) HasGermanContent() bool {
+	return p.Title.HasGerman() ||
+		p.ProcOfficeName.HasGerman() ||
+		p.OrderAddress.City.HasGerman()
+}
+
 type ProjectDetail struct {
 	ID          string    `json:"id"`
 	Title       MultiLang `json:"title"`
@@ -103,17 +110,26 @@ func (c *Client) FetchRecentTendersByCPV(lookbackDays int) ([]Project, error) {
 	for _, cpv := range topCPVCodes {
 		projects, err := c.searchPage(from, cpv, 50)
 		if err != nil {
-			// Log and continue — one failing CPV should not abort the whole run
 			fmt.Printf("warning: CPV %s search failed: %v\n", cpv, err)
 			continue
 		}
+
+		fmt.Printf("CPV %s returned %d projects\n", cpv, len(projects))
+
 		for _, p := range projects {
-			if !seen[p.ID] {
-				seen[p.ID] = true
-				result = append(result, p)
+			if !p.HasGermanContent() {
+				continue
 			}
+
+			if seen[p.ID] {
+				continue
+			}
+
+			seen[p.ID] = true
+			result = append(result, p)
 		}
-		time.Sleep(300 * time.Millisecond) // be polite to the API
+
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	return result, nil
@@ -122,21 +138,31 @@ func (c *Client) FetchRecentTendersByCPV(lookbackDays int) ([]Project, error) {
 // searchPage performs a single call to the project-search endpoint.
 func (c *Client) searchPage(from, cpvCode string, size int) ([]Project, error) {
 	params := url.Values{}
+
 	params.Set("newestPublicationFrom", from)
 	params.Set("newestPubTypes", "tender")
 	params.Set("size", fmt.Sprintf("%d", size))
 	params.Set("sort", "publicationDate,desc")
+
 	if cpvCode != "" {
-		params.Set("cpvCode", cpvCode)
+		params.Add("cpvCodes", cpvCode)
 	}
 
-	endpoint := fmt.Sprintf("%s/api/publications/v2/project/project-search?%s",
-		c.baseURL, params.Encode())
+	params.Add("lang", "de")
+
+	endpoint := fmt.Sprintf(
+		"%s/api/publications/v2/project/project-search?%s",
+		c.baseURL,
+		params.Encode(),
+	)
+
+	fmt.Printf("GET %s\n", endpoint)
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "project-radar/1.0 (aiza.ch)")
 
@@ -163,14 +189,16 @@ func (c *Client) searchPage(from, cpvCode string, size int) ([]Project, error) {
 // Returns nil (no error) if the detail endpoint is unavailable for this project.
 func (c *Client) FetchDetail(projectID string) (*ProjectDetail, error) {
 	endpoint := fmt.Sprintf(
-		"%s/api/publications/v2/project/%s/project-search-detail",
-		c.baseURL, projectID,
+		"%s/api/publications/v2/project/%s/project-search-detail?lang=de",
+		c.baseURL,
+		url.PathEscape(projectID),
 	)
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "project-radar/1.0 (aiza.ch)")
 
@@ -181,12 +209,13 @@ func (c *Client) FetchDetail(projectID string) (*ProjectDetail, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil // detail not always available
+		return nil, nil
 	}
 
 	var detail ProjectDetail
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
 		return nil, err
 	}
+
 	return &detail, nil
 }

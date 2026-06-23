@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"time"
 
+	"project_radar/internal/cache"
 	"project_radar/internal/config"
 	"project_radar/internal/mailer"
 	"project_radar/internal/ollama"
@@ -27,6 +29,14 @@ func main() {
 	ollamaClient := ollama.New(cfg.OllamaBaseURL, cfg.OllamaModel)
 	mailClient := mailer.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.MailFrom, cfg.MailTo)
 
+	// Load previously sent tenders to avoid duplicates
+	sentTenders, err := cache.LoadSentTenders()
+	if err != nil {
+		log.Printf("⚠  Warning: Could not load sent tenders cache: %v", err)
+		sentTenders = make(map[string]bool)
+	}
+	log.Printf("Loaded %d previously sent tenders from cache", len(sentTenders))
+
 	// Fetch tenders from simap.ch
 	log.Printf("Fetching tenders from the last %d day(s) via %s ...", cfg.LookbackDays, cfg.SimapBaseURL)
 
@@ -38,7 +48,10 @@ func main() {
 
 	if len(projects) == 0 {
 		log.Println("No new tenders found. Sending empty digest.")
-		sendDigest(mailClient, nil)
+		if err := sendDigest(mailClient, nil); err != nil {
+			log.Fatalf("failed to send digest email: %v", err)
+		}
+		log.Println("✅ Done.")
 		os.Exit(0)
 	}
 
@@ -48,13 +61,19 @@ func main() {
 	var matched []mailer.MatchedTender
 
 	for i, p := range projects {
+		// Skip if already sent
+		if sentTenders[p.PublicationID] {
+			log.Printf("[%d/%d] Skipping (already sent): %s", i+1, len(projects), p.Title.Best())
+			continue
+		}
+
 		title := p.Title.Best()
 		if title == "" {
 			title = "(no title)"
 		}
 		procOffice := p.ProcOfficeName.Best()
 		location := buildLocation(p)
-		simapURL := fmt.Sprintf("https://www.simap.ch/de/publikationen/%s", p.PublicationID)
+		simapURL := fmt.Sprintf("https://www.simap.ch/de/project-detail/%s", url.PathEscape(p.ID))
 
 		// Try to enrich with full description from the detail endpoint
 		description := ""
@@ -81,15 +100,16 @@ func main() {
 
 		if result.IsMatch && result.Score >= minScore {
 			matched = append(matched, mailer.MatchedTender{
-				Title:       title,
-				ProcOffice:  procOffice,
-				Location:    location,
-				PubDate:     p.PublicationDate,
-				Score:       result.Score,
-				Reasoning:   result.Reasoning,
-				SimapURL:    simapURL,
-				SubType:     p.ProjectSubType,
-				ProcessType: p.ProcessType,
+				Title:         title,
+				ProcOffice:    procOffice,
+				Location:      location,
+				PubDate:       p.PublicationDate,
+				Score:         result.Score,
+				Reasoning:     result.Reasoning,
+				SimapURL:      simapURL,
+				SubType:       p.ProjectSubType,
+				ProcessType:   p.ProcessType,
+				PublicationID: p.PublicationID,
 			})
 		}
 
@@ -98,7 +118,23 @@ func main() {
 
 	// Send digest email
 	log.Printf("Found %d matching tender(s). Sending digest to %s ...", len(matched), cfg.MailTo)
-	sendDigest(mailClient, matched)
+	if err := sendDigest(mailClient, matched); err != nil {
+		log.Fatalf("failed to send digest email: %v", err)
+	}
+
+	// Save sent tenders to cache to avoid duplicates
+	if len(matched) > 0 {
+		publicationIDs := make([]string, len(matched))
+		for i, t := range matched {
+			publicationIDs[i] = t.PublicationID
+		}
+		if err := cache.AppendSentTenders(publicationIDs); err != nil {
+			log.Printf("⚠  Warning: Could not save sent tenders to cache: %v", err)
+		} else {
+			log.Printf("✅ Saved %d sent tender(s) to cache", len(publicationIDs))
+		}
+	}
+
 	log.Println("✅ Done.")
 }
 
@@ -117,8 +153,6 @@ func buildLocation(p simap.Project) string {
 	}
 }
 
-func sendDigest(m *mailer.Mailer, tenders []mailer.MatchedTender) {
-	if err := m.Send(tenders); err != nil {
-		log.Fatalf("failed to send digest email: %v", err)
-	}
+func sendDigest(m *mailer.Mailer, tenders []mailer.MatchedTender) error {
+	return m.Send(tenders)
 }

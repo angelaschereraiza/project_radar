@@ -29,7 +29,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		SimapBaseURL:  getEnv("SIMAP_BASE_URL", "https://www.simap.ch"),
-		LookbackDays:  getEnvInt("LOOKBACK_DAYS", 1),
+		LookbackDays:  getEnvInt("LOOKBACK_DAYS", 7),
 		OllamaBaseURL: getEnv("OLLAMA_BASE_URL", "http://localhost:11434"),
 		OllamaModel:   getEnv("OLLAMA_MODEL", "mistral"),
 		SMTPHost:      getEnv("SMTP_HOST", ""),
